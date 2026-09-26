@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 
 from .domain import ConflictError, NotFoundError
 
-
 def utcnow():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -54,6 +53,10 @@ class SQLiteRepository:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(actor_id, idem_key)
                 );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_open_batch_observation
+                    ON entities(json_extract(data, '$.observation_id'), kind)
+                    WHERE kind = 'transport_batch'
+                      AND status IN ('registered', 'in_transit', 'under_review');
             """)
 
     @staticmethod
@@ -72,12 +75,15 @@ class SQLiteRepository:
     def create_entity(self, entity_id, kind, status, data, actor_id):
         now = utcnow()
         payload = json.dumps(data, ensure_ascii=False, sort_keys=True)
-        with self._connect() as connection:
-            connection.execute(
-                "INSERT INTO entities(id, kind, status, version, data, created_by, created_at, updated_at) "
-                "VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
-                (entity_id, kind, status, payload, actor_id, now, now),
-            )
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO entities(id, kind, status, version, data, created_by, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
+                    (entity_id, kind, status, payload, actor_id, now, now),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError("uniqueness constraint violated: " + str(exc))
         return self.get_entity(entity_id)
 
     def get_entity(self, entity_id):

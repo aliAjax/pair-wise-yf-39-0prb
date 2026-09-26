@@ -2,7 +2,9 @@ from uuid import uuid4
 
 from .audit import AuditTrail
 from .domain import ConflictError, NotFoundError
-from .rules import RuleEngine
+from .rules import APPEND_MARKER, RuleEngine
+
+OPEN_BATCH_STATUSES = ("registered", "in_transit", "under_review")
 
 
 class DomainService:
@@ -13,6 +15,14 @@ class DomainService:
 
     def _lookup(self, kind, field, value):
         return self.repository.find_entities(self.rules.normalize_kind(kind), field, value)
+
+    def _find_open_batch_by_box(self, box_code):
+        if not box_code:
+            return None
+        for batch in self.repository.list_entities(kind="transport_batch"):
+            if batch["status"] in OPEN_BATCH_STATUSES and batch["data"].get("box_code") == box_code:
+                return batch
+        return None
 
     def health(self):
         return {"status": "ok" if self.repository.ping() else "error"}
@@ -26,6 +36,16 @@ class DomainService:
                 entity = self.repository.get_entity(existing)
                 if entity:
                     return entity
+        if kind == "transport_batch":
+            # 重复箱号：转运尚未结束时的重放/重试直接返回首次登记结果
+            replay = self._find_open_batch_by_box(payload.get("box_code"))
+            if replay:
+                return replay
+            payload.setdefault("temperature_logs", [])
+            payload.setdefault("handover_logs", [])
+            payload.setdefault("handling_notes", [])
+            if actor.role == "carrier":
+                payload.setdefault("carrier_user_id", actor.user_id)
         self.rules.validate_create(actor, kind, payload, self._lookup)
         entity_id = str(payload.pop("id", "") or uuid4())
         if self.repository.get_entity(entity_id):
@@ -46,7 +66,11 @@ class DomainService:
             actor, entity, action, dict(data or {}), self._lookup
         )
         merged = dict(entity["data"])
+        appends = patch.pop(APPEND_MARKER, None)
         merged.update(patch)
+        if appends:
+            for field, entries in appends.items():
+                merged[field] = list(merged.get(field) or []) + list(entries)
         updated = self.repository.update_entity(entity_id, expected, next_status, merged)
         self.audit.record(
             entity_id,
@@ -54,7 +78,7 @@ class DomainService:
             action,
             entity["status"],
             updated["status"],
-            {"patch": patch},
+            {"patch": patch, "appends": appends or {}},
         )
         return updated
 

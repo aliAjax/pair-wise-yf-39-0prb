@@ -6,28 +6,208 @@
   <title>野生动物疫病监测与离线同步</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #1f2937; }
-    main { max-width: 820px; margin: auto; }
+    main { max-width: 960px; margin: auto; }
     pre { background: #f3f4f6; padding: 1rem; border-radius: 8px; overflow-x: auto; }
-    button { padding: .5rem .8rem; cursor: pointer; }
+    button { padding: .45rem .8rem; cursor: pointer; }
+    fieldset { border: 1px solid #d1d5db; border-radius: 8px; margin: 1rem 0; padding: 1rem; }
+    label { display: block; margin: .35rem 0; font-size: .92rem; }
+    input, select, textarea { padding: .35rem; margin-left: .4rem; min-width: 12rem; box-sizing: border-box; }
+    table { border-collapse: collapse; width: 100%; font-size: .88rem; margin-top: .5rem; }
+    th, td { border: 1px solid #e5e7eb; padding: .35rem .5rem; text-align: left; vertical-align: top; }
+    .badge { padding: .1rem .45rem; border-radius: 999px; font-size: .78rem; }
+    .registered { background: #e0e7ff; }
+    .in_transit { background: #fef3c7; }
+    .under_review { background: #fee2e2; }
+    .completed { background: #d1fae5; }
+    .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
   </style>
 </head>
 <body>
 <main>
   <h1>野生动物疫病监测与离线同步</h1>
-  <p>这是最小演示页面。使用浏览器或 curl 调用 JSON API。</p>
   <p><button onclick="checkHealth()">检查服务状态</button></p>
   <pre id="result">等待操作</pre>
+
+  <fieldset>
+    <legend>身份（请求头 X-User-Id / X-Role）</legend>
+    <label>用户 <input id="userId" value="field-1"></label>
+    <label>角色
+      <select id="role">
+        <option value="field" selected>field（野外人员）</option>
+        <option value="carrier">carrier（承运人）</option>
+        <option value="lab">lab（接收实验室）</option>
+        <option value="reviewer">reviewer（复核员）</option>
+        <option value="admin">admin</option>
+      </select>
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>1. 登记转运批次（观察须为 submitted）</legend>
+    <label>观察 ID <input id="obsId" placeholder="observation id"></label>
+    <label>箱号 <input id="boxCode" placeholder="BOX-1001"></label>
+    <label>起点 <input id="origin" placeholder="北山管护站"></label>
+    <label>目的地 <input id="destination" placeholder="省中心实验室"></label>
+    <label>承运人 <input id="carrier" placeholder="陈氏冷链 / driver-chen"></label>
+    <label>温度上限 ℃ <input id="tempLimit" type="number" step="0.1" value="8"></label>
+    <p><button onclick="registerBatch()">登记批次</button></p>
+  </fieldset>
+
+  <fieldset>
+    <legend>2. 批次动作</legend>
+    <div class="row">
+      <input id="batchId" placeholder="批次 ID" style="min-width: 18rem">
+      <button onclick="loadBatch()">读取批次</button>
+    </div>
+    <div class="row" style="margin-top:.6rem">
+      离场测温 ℃ <input id="departTemp" type="number" step="0.1">
+      <button onclick="depart()">放行（合规才放行）</button>
+    </div>
+    <div class="row" style="margin-top:.6rem">
+      交给 <input id="handoverTo" placeholder="中转人/接收方">
+      测温 ℃ <input id="handoverTemp" type="number" step="0.1" placeholder="可选">
+      <button onclick="handover()">途中交接</button>
+    </div>
+    <div class="row" style="margin-top:.6rem">
+      接收实测 ℃ <input id="arrivalTemp" type="number" step="0.1">
+      <button onclick="receive()">实验室接收</button>
+    </div>
+    <div class="row" style="margin-top:.6rem">
+      处置说明（仅原承运人）<input id="handlingNote" placeholder="超限原因与处置">
+      <button onclick="addNote()">补处置说明</button>
+    </div>
+    <div class="row" style="margin-top:.6rem">
+      复核意见（复核员）<input id="reviewNote" placeholder="确认恢复送检">
+      <button onclick="confirmReview()">复核确认</button>
+    </div>
+    <div id="batchView"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>3. 批次列表</legend>
+    <p><button onclick="listBatches()">刷新批次</button></p>
+    <div id="batchList"></div>
+  </fieldset>
+
   <h2>常用接口</h2>
   <pre>GET  /health
-GET  /api/&lt;kind&gt;
-POST /api/&lt;kind&gt;
+GET  /api/&lt;kind&gt;                       # kind: observations / samples / clusters / transport_batches
+POST /api/&lt;kind&gt;                       # 创建；转运批次重复箱号返回首次结果
 GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre>
+POST /api/entities/&lt;id&gt;/actions       # {"action":"动作名","data":{...},"expected_version":n}
+GET  /api/audit?entity_id=&lt;id&gt;         # 交接与温度动作均有审计</pre>
 </main>
 <script>
+function headers() {
+  return {
+    'Content-Type': 'application/json',
+    'X-User-Id': document.getElementById('userId').value,
+    'X-Role': document.getElementById('role').value,
+  };
+}
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const payload = await response.json();
+  document.getElementById('result').textContent =
+    'HTTP ' + response.status + '\n' + JSON.stringify(payload, null, 2);
+  if (!response.ok) throw new Error(payload.error);
+  return payload;
+}
+
 async function checkHealth() {
-  const response = await fetch('/health');
-  document.getElementById('result').textContent = JSON.stringify(await response.json(), null, 2);
+  document.getElementById('result').textContent =
+    JSON.stringify(await (await fetch('/health')).json(), null, 2);
+}
+
+function batchPayload() {
+  return {
+    observation_id: document.getElementById('obsId').value.trim(),
+    box_code: document.getElementById('boxCode').value.trim(),
+    origin: document.getElementById('origin').value.trim(),
+    destination: document.getElementById('destination').value.trim(),
+    carrier: document.getElementById('carrier').value.trim(),
+    temp_limit: parseFloat(document.getElementById('tempLimit').value),
+  };
+}
+
+async function registerBatch() {
+  const payload = await api('/api/transport_batches', {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify(batchPayload()),
+  });
+  document.getElementById('batchId').value = payload.id;
+  renderBatch(payload);
+  await listBatches();
+}
+
+async function act(action, data) {
+  const id = document.getElementById('batchId').value.trim();
+  const payload = await api('/api/entities/' + encodeURIComponent(id) + '/actions', {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({ action, data }),
+  });
+  renderBatch(payload);
+  await listBatches();
+}
+
+const depart = () => act('depart', { departure_temp: parseFloat(document.getElementById('departTemp').value) });
+const handover = () => act('handover', {
+  to_party: document.getElementById('handoverTo').value.trim(),
+  temperature: document.getElementById('handoverTemp').value === '' ? null : parseFloat(document.getElementById('handoverTemp').value),
+});
+const receive = () => act('receive', { arrival_temp: parseFloat(document.getElementById('arrivalTemp').value) });
+const addNote = () => act('add_handling_note', { note: document.getElementById('handlingNote').value.trim() });
+const confirmReview = () => act('confirm_review', { note: document.getElementById('reviewNote').value.trim() });
+
+async function loadBatch() {
+  const id = document.getElementById('batchId').value.trim();
+  renderBatch(await api('/api/entities/' + encodeURIComponent(id)));
+}
+
+function tempRows(logs, limit) {
+  return (logs || []).map(e => `<tr>
+    <td>${e.stage}</td><td>${e.temperature}${limit ? ' / ' + limit : ''}</td>
+    <td>${e.compliant ? '合规' : '<b>超限</b>'}</td><td>${e.measured_at || ''}</td><td>${e.by || ''}</td>
+  </tr>`).join('');
+}
+
+function handoverRows(logs) {
+  return (logs || []).map(e => `<tr>
+    <td>${e.stage}</td><td>${e.from_party || ''}</td><td>${e.to_party || ''}</td>
+    <td>${e.note || ''}</td><td>${e.handover_at || ''}</td><td>${e.by || ''}</td>
+  </tr>`).join('');
+}
+
+function renderBatch(b) {
+  const d = b.data;
+  document.getElementById('batchView').innerHTML = `
+    <h3>批次 ${b.id} <span class="badge ${b.status}">${b.status}</span>${d.submission_suspended ? ' <span class="badge under_review">送检暂停</span>' : ''}</h3>
+    <p>箱号 ${d.box_code} ｜ ${d.origin} → ${d.destination} ｜ 承运人 ${d.carrier} ｜ 温度上限 ${d.temp_limit}℃ ｜ 观察 ${d.observation_id}</p>
+    <h4>温度记录</h4>
+    <table><thead><tr><th>环节</th><th>实测/上限℃</th><th>判定</th><th>时间</th><th>登记人</th></tr></thead>
+    <tbody>${tempRows(d.temperature_logs, d.temp_limit)}</tbody></table>
+    <h4>交接记录</h4>
+    <table><thead><tr><th>环节</th><th>交出方</th><th>接收方</th><th>备注</th><th>时间</th><th>登记人</th></tr></thead>
+    <tbody>${handoverRows(d.handover_logs)}</tbody></table>
+    <h4>处置与复核</h4>
+    <table><tbody>
+      ${(d.handling_notes || []).map(n => `<tr><td>承运人处置</td><td>${n.note}</td><td>${n.at}</td><td>${n.by}</td></tr>`).join('')}
+      ${d.reviewed_by ? `<tr><td>复核确认</td><td>${d.review_note || ''}</td><td>${d.reviewed_at}</td><td>${d.reviewed_by}</td></tr>` : ''}
+    </tbody></table>`;
+}
+
+async function listBatches() {
+  const payload = await api('/api/transport_batches');
+  document.getElementById('batchList').innerHTML = `<table>
+    <thead><tr><th>ID</th><th>箱号</th><th>状态</th><th>路线</th><th>上限℃</th><th>观察</th></tr></thead>
+    <tbody>${payload.items.map(b => `<tr style="cursor:pointer" onclick="document.getElementById('batchId').value='${b.id}';loadBatch()">
+      <td>${b.id}</td><td>${b.data.box_code}</td>
+      <td><span class="badge ${b.status}">${b.status}</span>${b.data.submission_suspended ? ' 暂停送检' : ''}</td>
+      <td>${b.data.origin} → ${b.data.destination}</td><td>${b.data.temp_limit}</td><td>${b.data.observation_id}</td>
+    </tr>`).join('')}</tbody></table>`;
 }
 </script>
 </body>

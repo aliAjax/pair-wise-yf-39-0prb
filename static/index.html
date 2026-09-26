@@ -6,29 +6,252 @@
   <title>野生动物疫病监测与离线同步</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #1f2937; }
-    main { max-width: 820px; margin: auto; }
+    main { max-width: 960px; margin: auto; }
     pre { background: #f3f4f6; padding: 1rem; border-radius: 8px; overflow-x: auto; }
-    button { padding: .5rem .8rem; cursor: pointer; }
+    button { padding: .4rem .7rem; cursor: pointer; }
+    section { border: 1px solid #e5e7eb; border-radius: 10px; padding: 1rem 1.2rem; margin: 1rem 0; }
+    h2 { margin-top: .2rem; }
+    label { display: inline-block; margin: .2rem .6rem .2rem 0; font-size: .9rem; }
+    input, select { padding: .3rem .4rem; }
+    table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+    th, td { border: 1px solid #e5e7eb; padding: .35rem .5rem; text-align: left; }
+    .badge { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .78rem; }
+    .ok { background: #dcfce7; color: #166534; }
+    .warn { background: #fee2e2; color: #991b1b; }
+    .idle { background: #e5e7eb; color: #374151; }
+    .muted { color: #6b7280; font-size: .85rem; }
+    .row { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: .4rem 0; }
   </style>
 </head>
 <body>
 <main>
   <h1>野生动物疫病监测与离线同步</h1>
-  <p>这是最小演示页面。使用浏览器或 curl 调用 JSON API。</p>
-  <p><button onclick="checkHealth()">检查服务状态</button></p>
+
+  <section>
+    <strong>当前操作者</strong>
+    <div class="row">
+      <label>用户ID <input id="uid" value="zhangsan" size="10"></label>
+      <label>角色
+        <select id="role">
+          <option value="admin">admin（管理员）</option>
+          <option value="field" selected>field（现场员）</option>
+          <option value="lab">lab（实验室）</option>
+          <option value="carrier">carrier（承运人）</option>
+          <option value="reviewer">reviewer（复核员）</option>
+          <option value="epidemiologist">epidemiologist（流调员）</option>
+          <option value="viewer">viewer（只读）</option>
+        </select>
+      </label>
+      <button onclick="refreshAll()">刷新数据</button>
+      <span class="muted">切换角色不换用户ID，可演示“原承运人补说明”等身份校验。</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>① 现场观察（原有流程）</h2>
+    <div class="row">
+      <label>事件ID <input id="o_event" size="8"></label>
+      <label>物种 <input id="o_species" value="deer" size="8"></label>
+      <label>地点 <input id="o_location" value="North" size="8"></label>
+      <label>观察日期 <input id="o_date" type="date" value="2026-09-20"></label>
+      <label>纬度 <input id="o_lat" value="40.0" size="6"></label>
+      <label>经度 <input id="o_lon" value="116.0" size="6"></label>
+      <button onclick="createObservation()">新建并提交观察</button>
+    </div>
+    <table>
+      <thead><tr><th>观察ID</th><th>事件</th><th>物种</th><th>状态</th></tr></thead>
+      <tbody id="obs-body"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>② 转运批次</h2>
+    <div class="row">
+      <label>已提交观察
+        <select id="b_obs"></select>
+      </label>
+      <label>箱号 <input id="b_box" size="8"></label>
+      <label>起点 <input id="b_origin" value="North 保护站" size="12"></label>
+      <label>目的地 <input id="b_dest" value="省实验室" size="12"></label>
+      <label>承运人 <input id="b_carrier" value="lenglian-wang" size="12"></label>
+      <label>温度上限(℃) <input id="b_max" value="8" size="4"></label>
+      <button onclick="createBatch()">登记批次</button>
+    </div>
+    <p class="muted">同一观察不能存在于两个未结束批次；重复箱号的重复提交会直接返回首次创建的批次。</p>
+    <table>
+      <thead><tr><th>批次/箱号</th><th>观察</th><th>路线</th><th>上限</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody id="batch-body"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>③ 批次温度与交接记录</h2>
+    <div id="detail" class="muted">点击批次行的“查看记录”。</div>
+  </section>
+
   <pre id="result">等待操作</pre>
-  <h2>常用接口</h2>
-  <pre>GET  /health
-GET  /api/&lt;kind&gt;
-POST /api/&lt;kind&gt;
-GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre>
+
+  <section>
+    <h2>接口</h2>
+<pre>GET  /health
+GET  /api/transport_batches            转运批次列表（?status= 过滤）
+POST /api/transport_batches            登记批次
+GET  /api/entities/&lt;id&gt;                批次详情（含温度与交接记录）
+POST /api/entities/&lt;id&gt;/actions        release / receive / add_handling_note / review
+GET  /api/audit                        审计时间线</pre>
+  </section>
 </main>
 <script>
-async function checkHealth() {
-  const response = await fetch('/health');
-  document.getElementById('result').textContent = JSON.stringify(await response.json(), null, 2);
+function headers() {
+  return {'X-User-Id': document.getElementById('uid').value || 'anonymous',
+          'X-Role': document.getElementById('role').value,
+          'Content-Type': 'application/json'};
 }
+function show(payload) {
+  document.getElementById('result').textContent = JSON.stringify(payload, null, 2);
+}
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const payload = await response.json();
+  if (!response.ok) throw payload;
+  return payload;
+}
+async function act(id, action, data) {
+  try {
+    const entity = await api('/api/entities/' + id + '/actions', {
+      method: 'POST', headers: headers(), body: JSON.stringify({action, data})
+    });
+    show(entity);
+    await refreshAll();
+  } catch (err) { show({error: err.error || err, detail: err}); }
+}
+
+async function createObservation() {
+  const body = {
+    event_id: document.getElementById('o_event').value || ('E-' + Date.now()),
+    species: document.getElementById('o_species').value,
+    location: document.getElementById('o_location').value,
+    observed_at: document.getElementById('o_date').value,
+    lat: parseFloat(document.getElementById('o_lat').value),
+    lon: parseFloat(document.getElementById('o_lon').value)
+  };
+  try {
+    const created = await api('/api/observations', {method: 'POST', headers: headers(), body: JSON.stringify(body)});
+    await api('/api/entities/' + created.id + '/actions', {
+      method: 'POST', headers: headers(),
+      body: JSON.stringify({action: 'submit', data: {location: body.location, observed_at: body.observed_at}})
+    });
+    await refreshAll();
+  } catch (err) { show({error: err.error || err, detail: err}); }
+}
+
+async function createBatch() {
+  const body = {
+    observation_id: document.getElementById('b_obs').value,
+    box_code: document.getElementById('b_box').value || ('BOX-' + Date.now()),
+    origin: document.getElementById('b_origin').value,
+    destination: document.getElementById('b_dest').value,
+    carrier: document.getElementById('b_carrier').value,
+    max_temperature: parseFloat(document.getElementById('b_max').value)
+  };
+  try {
+    const created = await api('/api/transport_batches', {method: 'POST', headers: headers(), body: JSON.stringify(body)});
+    show(created);
+    await refreshAll();
+  } catch (err) { show({error: err.error || err, detail: err}); }
+}
+
+function badge(status) {
+  const map = {
+    registered: ['idle', '已登记'], in_transit: ['ok', '在途/已放行'],
+    received: ['ok', '已接收'], pending_review: ['warn', '待复核（暂停送检）']
+  };
+  const [cls, text] = map[status] || ['idle', status];
+  return '<span class="badge ' + cls + '">' + text + '</span>';
+}
+
+function actionButtons(b) {
+  const t = prompt;
+  const s = b.status;
+  let html = '';
+  if (s === 'registered') {
+    html += '<button onclick="askRelease(\'' + b.id + '\')">放行(离场温度)</button> ';
+  }
+  if (s === 'in_transit') {
+    html += '<button onclick="askReceive(\'' + b.id + '\')">接收(实测温度)</button> ';
+  }
+  if (s === 'pending_review') {
+    html += '<button onclick="askNote(\'' + b.id + '\')">原承运人补处置说明</button> ';
+    html += '<button onclick="askReview(\'' + b.id + '\')">复核员确认恢复</button> ';
+  }
+  html += '<button onclick="viewDetail(\'' + b.id + '\')">查看记录</button>';
+  return html;
+}
+
+function askRelease(id) {
+  const v = prompt('离场实测温度(℃)，超过上限将被拒绝放行：', '6');
+  if (v !== null) act(id, 'release', {departure_temp: parseFloat(v)});
+}
+function askReceive(id) {
+  const v = prompt('接收实测温度(℃)，超过上限转待复核并暂停送检：', '7');
+  if (v !== null) act(id, 'receive', {arrival_temp: parseFloat(v)});
+}
+function askNote(id) {
+  const v = prompt('处置说明（仅登记该批次的原承运人可提交）：', '已加冰排，温度回落至6℃');
+  if (v !== null) act(id, 'add_handling_note', {handling_note: v});
+}
+function askReview(id) {
+  const v = prompt('复核意见（复核员确认后恢复在途）：', '处置有效，同意恢复送检');
+  if (v !== null) act(id, 'review', {review_note: v});
+}
+
+async function viewDetail(id) {
+  try {
+    const b = await api('/api/entities/' + id);
+    const temps = (b.data.temperature_records || []).map(r =>
+      '<tr><td>' + r.stage + '</td><td>' + r.temperature + ' / 上限 ' + r.limit +
+      '</td><td>' + (r.compliant ? '合规' : '<b>超限</b>') + '</td><td>' + r.at + '</td><td>' + r.by + '</td></tr>').join('');
+    const hands = (b.data.handovers || []).map(h =>
+      '<tr><td>' + h.stage + '</td><td>' + (h.from_party || '') + ' → ' + (h.to_party || '') +
+      '</td><td>' + (h.temperature != null ? h.temperature + '℃' : '') +
+      (h.flag ? ' <span class="badge warn">' + h.flag + '</span>' : '') +
+      '</td><td>' + (h.note || '') + '</td><td>' + h.at + '</td><td>' + h.by + '</td></tr>').join('');
+    document.getElementById('detail').innerHTML =
+      '<p><strong>' + b.data.box_code + '</strong> ' + badge(b.status) +
+      ' 版本 v' + b.version + '</p>' +
+      '<p class="muted">温度记录</p>' +
+      '<table><thead><tr><th>环节</th><th>实测/上限</th><th>判定</th><th>时间</th><th>操作人</th></tr></thead><tbody>' +
+      (temps || '<tr><td colspan="5">暂无</td></tr>') + '</tbody></table>' +
+      '<p class="muted">交接记录</p>' +
+      '<table><thead><tr><th>环节</th><th>交接方</th><th>温度</th><th>说明</th><th>时间</th><th>操作人</th></tr></thead><tbody>' +
+      (hands || '<tr><td colspan="6">暂无</td></tr>') + '</tbody></table>';
+    show(b);
+  } catch (err) { show({error: err.error || err, detail: err}); }
+}
+
+async function refreshAll() {
+  try {
+    const [obs, batches] = await Promise.all([
+      api('/api/observations'),
+      api('/api/transport_batches')
+    ]);
+    const submitted = obs.items.filter(o => o.status === 'submitted');
+    document.getElementById('obs-body').innerHTML = obs.items.map(o =>
+      '<tr><td>' + o.id + '</td><td>' + o.data.event_id + '</td><td>' + o.data.species +
+      '</td><td><span class="badge ' + (o.status === 'submitted' ? 'ok' : 'idle') + '">' + o.status + '</span></td></tr>').join('')
+      || '<tr><td colspan="4" class="muted">暂无观察</td></tr>';
+    document.getElementById('b_obs').innerHTML = submitted.map(o =>
+      '<option value="' + o.id + '">' + o.id + '（' + o.data.event_id + '）</option>').join('');
+    document.getElementById('batch-body').innerHTML = batches.items.map(b =>
+      '<tr><td>' + b.id + '<br><span class="muted">' + b.data.box_code + '</span></td>' +
+      '<td>' + b.data.observation_id + '</td>' +
+      '<td>' + b.data.origin + ' → ' + b.data.destination + '<br><span class="muted">承运：' + b.data.carrier + '</span></td>' +
+      '<td>' + b.data.max_temperature + '℃</td><td>' + badge(b.status) + '</td>' +
+      '<td>' + actionButtons(b) + '</td></tr>').join('')
+      || '<tr><td colspan="6" class="muted">暂无批次</td></tr>';
+  } catch (err) { show({error: err.error || err, detail: err}); }
+}
+refreshAll();
 </script>
 </body>
 </html>

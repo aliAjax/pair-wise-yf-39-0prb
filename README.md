@@ -25,6 +25,18 @@ python3 app.py --db ./data.db --port 8305
 ## 核心对象
 
 - `observation`：现场观察；`sample`：样本与实验室结果；`cluster`：异常聚集事件。
+- `transport_batch`：转运批次，每批关联一条已提交观察，登记起点、目的地、承运人和温度上限。
+
+### 转运批次状态机
+
+`registered`（已登记）→ `release` → `in_transit`（在途）→ `receive` → `received`（已接收）
+
+- `release` 需上报离场实测温度，超过登记的温度上限将拒绝放行。
+- `receive` 上报接收实测温度：合规则结束（`received`）；超限转 `pending_review`（待复核），并暂停关联样本的 `send_lab`。
+- 待复核时先由**登记该批次的原承运人**（`carrier` 角色或 `admin`）执行 `add_handling_note` 补处置说明，再由复核员（`reviewer`）执行 `review` 确认，恢复为 `in_transit` 后可重新接收。
+- 同一观察不能出现在两个未结束批次（`registered`/`in_transit`/`pending_review`）中；批次结束后观察可再次转运。
+- 重复提交相同 `box_code`（箱号）直接返回首次创建的批次，便于网络重试。
+- 批次数据中维护 `temperature_records`（各环节温度与合规判定）和 `handovers`（交接时间线），动作同时写入审计日志。
 
 ## 主要接口
 
@@ -35,7 +47,27 @@ python3 app.py --db ./data.db --port 8305
 - `POST /api/entities/<id>/actions`：提交`{"action":"动作名","data":{...},"expected_version":数字}`。
 - `GET /api/audit`：读取审计记录。
 
-请求身份通过`X-User-Id`和`X-Role`请求头传入。创建和动作的可执行角色由规则引擎控制。
+请求身份通过`X-User-Id`和`X-Role`请求头传入。创建和动作的可执行角色由规则引擎控制。转运批次使用 `field`（登记/放行/接收）、`carrier`（补处置说明，需为批次登记的原承运人）和 `reviewer`（复核确认）角色。
+
+### 转运批次示例
+
+```bash
+# 登记批次（observation_id 必须是已 submitted 的观察）
+curl -X POST localhost:8305/api/transport_batches \
+  -H 'Content-Type: application/json' -H 'X-Role: field' \
+  -d '{"observation_id":"<obs-id>","box_code":"BOX-1","origin":"北保护站","destination":"省实验室","carrier":"lenglian-wang","max_temperature":8}'
+# 放行（离场温度合规才放行）
+curl -X POST localhost:8305/api/entities/<batch-id>/actions -H 'X-Role: field' \
+  -d '{"action":"release","data":{"departure_temp":6}}'
+# 接收（超限自动转 pending_review 并暂停送检）
+curl -X POST localhost:8305/api/entities/<batch-id>/actions -H 'X-Role: field' \
+  -d '{"action":"receive","data":{"arrival_temp":10.5}}'
+# 原承运人补处置说明 → 复核员确认恢复
+curl -X POST localhost:8305/api/entities/<batch-id>/actions -H 'X-Role: carrier' -H 'X-User-Id: lenglian-wang' \
+  -d '{"action":"add_handling_note","data":{"handling_note":"已补冰排，温度回落"}}'
+curl -X POST localhost:8305/api/entities/<batch-id>/actions -H 'X-Role: reviewer' \
+  -d '{"action":"review","data":{"review_note":"同意恢复送检"}}'
+```
 
 ## 测试
 

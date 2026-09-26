@@ -26,6 +26,11 @@ class DomainService:
                 entity = self.repository.get_entity(existing)
                 if entity:
                     return entity
+        if kind == "transport_batch" and payload.get("box_code"):
+            # 重复箱号（网络重试/重复提交）直接返回首次创建的批次
+            prior = self.repository.find_entities("transport_batch", "box_code", payload["box_code"])
+            if prior:
+                return prior[0]
         self.rules.validate_create(actor, kind, payload, self._lookup)
         entity_id = str(payload.pop("id", "") or uuid4())
         if self.repository.get_entity(entity_id):

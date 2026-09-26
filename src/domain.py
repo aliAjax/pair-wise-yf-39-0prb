@@ -33,6 +33,8 @@ class Role(str, Enum):
     field = "field"
     lab = "lab"
     epidemiologist = "epidemiologist"
+    carrier = "carrier"
+    reviewer = "reviewer"
 
 
 @dataclass
